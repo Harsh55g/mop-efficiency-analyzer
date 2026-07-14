@@ -1,0 +1,352 @@
+"""
+sles_mop.py
+=============================================================================
+Strict Local Efficiency (SLES) Characterization for Multiobjective
+Programming Problems (MOP) -- an interactive implementation of the theory
+in:
+
+    A. Gupta, A. Mehra, D. Bhatia, "Characterizing strict efficiency for
+    convex multiobjective programming problems", J. Glob. Optim.
+    49:265-280 (2011).
+
+What this script does
+----------------------
+Given
+    MOP:  min ( f_1(x),...,f_p(x) )  s.t.  g_j(x) <= 0,  j = 1..q
+
+a candidate point x_bar, a strictly positive weight vector alpha in int(R^p_+),
+an order m >= 1 and a radius delta > 0, the script:
+
+1.  Builds the "penalty" (D.C.) functions
+        pen_i(x) = f_i(x) - alpha_i * ||x - x_bar||^m ,   i = 1..p
+    cf. Lemma 2.1 / problem (MOP)_alpha.
+
+2.  Monte-Carlo samples points x inside F (the feasible set) intersected
+    with the open ball B(x', delta) around a chosen test point x'
+    (x' may be taken equal to x_bar), and uses them to numerically build
+        S*_{alpha,delta}(x')   (Section 2)
+    and the resulting partition of the objective index set P into
+        P=_{alpha,delta}(x')   and   P<_{alpha,delta}(x')
+
+3.  Prints the associated Reduced Multiobjective Problem
+        RMOP( P<_{alpha,delta}(x'), x_bar )
+    (Section 2, just below Lemma 2.1).
+
+4.  Numerically checks condition (2) of Theorem 2.2,
+        f_i(x_bar) + alpha_i*||x'-x_bar||^m  >=  f_i(x') ,  for all i in P,
+    which (together with local efficiency of the reduced problem) certifies
+    that x_bar is a SLES of order m for MOP.
+
+5.  Runs an independent Monte-Carlo search inside F ∩ B(x_bar,delta) for a
+    point that VIOLATES inequality (1) of Proposition 1.1,
+        f(x) >= f(x_bar) + alpha*||x-x_bar||^m   (in the "<|" partial order)
+    i.e. a point that componentwise dominates the right-hand side. Failure
+    to find such a point after many samples is numerical evidence (NOT a
+    proof) that x_bar behaves like a SLES of order m for the supplied
+    alpha, delta.
+
+Notes / disclaimers
+--------------------
+*  Monte-Carlo sampling can only ever give numerical evidence for or
+   against the conditions in the paper; it cannot replace the analytic
+   subdifferential calculations of Theorems 3.2-4.3. Treat the verdicts
+   printed by this script as a quick sanity-check / exploration tool.
+*  Objective and constraint functions are entered as plain algebraic
+   expressions parsed by SymPy, e.g.  x1**2 + x2**2 - 1
+   Piecewise expressions are supported, e.g.
+       Piecewise((x1**2+x2**2, x1**2+x2**2>=1), (sqrt(x1**2+x2**2), True))
+*  Constraints must be written in the form  g_j(x) <= 0.
+
+Dependencies: numpy, sympy
+=============================================================================
+"""
+
+import sys
+import numpy as np
+import sympy as sp
+
+
+# --------------------------------------------------------------------------- #
+#  Input helpers
+# --------------------------------------------------------------------------- #
+def read_vars():
+    raw = input("Enter variable names separated by commas (e.g. x1,x2): ").strip()
+    names = [v.strip() for v in raw.split(",") if v.strip()]
+    if not names:
+        raise ValueError("At least one variable is required.")
+    syms = list(sp.symbols(names))
+    return names, syms
+
+
+def read_expressions(label, syms):
+    sym_locals = {str(v): v for v in syms}
+    # make common functions/constants available to sympify
+    sym_locals.update({"Piecewise": sp.Piecewise, "sqrt": sp.sqrt, "Abs": sp.Abs,
+                        "exp": sp.exp, "log": sp.log, "pi": sp.pi})
+    n = int(input(f"How many {label} functions? "))
+    exprs = []
+    for i in range(n):
+        s = input(f"  {label}_{i+1}(x) = ")
+        expr = sp.sympify(s, locals=sym_locals)
+        exprs.append(expr)
+    return exprs
+
+
+def read_point(syms, label):
+    print(f"Enter coordinates for {label}:")
+    vals = []
+    for v in syms:
+        vals.append(float(input(f"  {v} = ")))
+    return np.array(vals, dtype=float)
+
+
+def read_alpha(p):
+    print(f"Enter alpha vector (must be strictly positive, length {p}), "
+          f"per Proposition 1.1: alpha in int(R^p_+):")
+    alpha = []
+    for i in range(p):
+        a = float(input(f"  alpha_{i+1} = "))
+        if a <= 0:
+            raise ValueError("alpha components must be > 0.")
+        alpha.append(a)
+    return np.array(alpha)
+
+
+# --------------------------------------------------------------------------- #
+#  Built-in demonstration: Example 2.1 of the paper
+# --------------------------------------------------------------------------- #
+def build_demo():
+    x1, x2 = sp.symbols("x1 x2")
+    syms = [x1, x2]
+    names = ["x1", "x2"]
+
+    f1 = -x1 + x2
+    f2 = sp.Piecewise((x1**2 + x2**2, (x1**2 + x2**2) >= 1),
+                       (sp.sqrt(x1**2 + x2**2), True))
+    f_exprs = [f1, f2]
+
+    g1 = x1 - x2 + sp.Rational(1, 2) * x1 * x2 - 1
+    g2 = x1**2 + x2**2 - 2
+    g_exprs = [g1, g2]
+
+    x_bar = np.array([0.0, 0.0])
+    x_prime = np.array([1.0, 0.0])
+    alpha = np.array([1.0, 0.5])
+    m = 1
+    delta = 0.5
+
+    return names, syms, f_exprs, g_exprs, x_bar, x_prime, alpha, m, delta
+
+
+# --------------------------------------------------------------------------- #
+#  Main analysis
+# --------------------------------------------------------------------------- #
+def main():
+    print("=" * 78)
+    print(" SLES (Strict Local Efficient Solution) Characterization Tool")
+    print(" Based on Gupta, Mehra & Bhatia (2011), J. Glob. Optim. 49:265-280")
+    print("=" * 78)
+
+    use_demo = input(
+        "\nRun built-in demo (Example 2.1 of the paper) instead of manual "
+        "input? (y/n): "
+    ).strip().lower() == "y"
+
+    if use_demo:
+        (names, syms, f_exprs, g_exprs,
+         x_bar, x_prime, alpha, m, delta) = build_demo()
+        print("\nLoaded Example 2.1 from the paper:")
+        print("  f1 = -x1 + x2")
+        print("  f2 = Piecewise(x1^2+x2^2 if x1^2+x2^2>=1 else sqrt(x1^2+x2^2))")
+        print("  g1 = x1 - x2 + 0.5*x1*x2 - 1 <= 0")
+        print("  g2 = x1^2 + x2^2 - 2 <= 0")
+        print("  x_bar = (0,0), x' = (1,0), alpha = (1, 0.5), m = 1, delta = 0.5")
+    else:
+        names, syms = read_vars()
+        f_exprs = read_expressions("objective", syms)
+        g_exprs = read_expressions("constraint g_j(x) <= 0", syms)
+
+        print("\n--- Candidate point x_bar (the point being tested for SLES) ---")
+        x_bar = read_point(syms, "x_bar")
+
+        print("\n--- Test point x' (used to build S*, P=, P< per Section 2) ---")
+        same = input("Use x' = x_bar? (y/n): ").strip().lower()
+        x_prime = x_bar.copy() if same == "y" else read_point(syms, "x'")
+
+        alpha = read_alpha(len(f_exprs))
+        m = int(input("\nOrder m (integer >= 1): "))
+        delta = float(input("Radius delta (> 0): "))
+
+    n = len(syms)
+    p = len(f_exprs)
+    q = len(g_exprs)
+    P = list(range(p))
+
+    f_funcs = [sp.lambdify(syms, fe, modules=["numpy"]) for fe in f_exprs]
+    g_funcs = [sp.lambdify(syms, ge, modules=["numpy"]) for ge in g_exprs]
+
+    N = int(input("\nNumber of Monte Carlo samples (e.g. 20000): "))
+    rng = np.random.default_rng()
+
+    def feasible(x):
+        return all(float(g(*x)) <= 1e-9 for g in g_funcs)
+
+    def fvals(x):
+        return np.array([float(f(*x)) for f in f_funcs], dtype=float)
+
+    def penalty(x):
+        # pen_i(x) = f_i(x) - alpha_i * ||x - x_bar||^m   (Lemma 2.1)
+        d = np.linalg.norm(x - x_bar)
+        return fvals(x) - alpha * (d ** m)
+
+    def sample_ball(center, n_pts):
+        pts = []
+        for _ in range(n_pts):
+            direction = rng.normal(size=n)
+            norm_dir = np.linalg.norm(direction)
+            if norm_dir < 1e-15:
+                continue
+            direction /= norm_dir
+            radius = delta * (rng.random() ** (1.0 / n))
+            x = center + radius * direction
+            pts.append(x)
+        return pts
+
+    # ----------------------------------------------------------------- #
+    # Step 1: Monte Carlo build of S*_{alpha,delta}(x')
+    # ----------------------------------------------------------------- #
+    raw_samples = sample_ball(x_prime, N)
+    samples = [x for x in raw_samples
+               if np.linalg.norm(x - x_prime) > 1e-12 and feasible(x)]
+
+    print(f"\nGenerated {len(samples)} feasible samples in "
+          f"F ∩ B(x',delta)\\{{x'}}  (out of {N} drawn)")
+
+    pen_prime = penalty(x_prime)
+
+    S_star = []
+    for x in samples:
+        pen_x = penalty(x)
+        if np.all(pen_x <= pen_prime + 1e-9):
+            S_star.append(x)
+
+    print(f"|S*_alpha,delta(x')|  (Monte Carlo estimate) = {len(S_star)}")
+
+    # ----------------------------------------------------------------- #
+    # Step 2: Partition P into P=_{alpha,delta}(x') and P<_{alpha,delta}(x')
+    # ----------------------------------------------------------------- #
+    P_eq, P_lt = [], []
+    for i in P:
+        if len(S_star) == 0:
+            # vacuous implication: x in S* => equality  (S* empty)
+            P_eq.append(i)
+            continue
+        diffs = np.array([penalty(x)[i] - pen_prime[i] for x in S_star])
+        strict_found = np.any(diffs < -1e-9)
+        always_equal = np.all(np.abs(diffs) < 1e-7)
+        if strict_found:
+            P_lt.append(i)
+        elif always_equal:
+            P_eq.append(i)
+        else:
+            # numerically ambiguous (e.g. only >= but not == within tol):
+            # by definition i belongs to P< if a strict decrease exists,
+            # otherwise it defaults to P=
+            P_eq.append(i)
+
+    P_lt = sorted(set(P_lt))
+    P_eq = sorted(set(i for i in P_eq if i not in P_lt))
+
+    print(f"\n--- Partition of objective index set P = {{1,...,{p}}} ---")
+    print("P<_alpha,delta(x') =", [i + 1 for i in P_lt],
+          "  (objectives that can strictly decrease on S*)")
+    print("P=_alpha,delta(x') =", [i + 1 for i in P_eq],
+          "  (objectives constant over S*, dropped as constraints)")
+
+    # ----------------------------------------------------------------- #
+    # Step 3: print RMOP(P<_alpha,delta(x'), x_bar)
+    # ----------------------------------------------------------------- #
+    print("\n--- Reduced Problem  RMOP( P<_alpha,delta(x'), x_bar ) ---")
+    if not P_lt:
+        print("P< is empty: x' is (numerically) a local efficient point of "
+              "(MOP)_alpha, S* is empty, and the reduced problem is vacuous.")
+    else:
+        obj_list = ", ".join(
+            f"f_{i+1}(x) - {alpha[i]:g}*||x-x_bar||^{m}" for i in P_lt
+        )
+        print(f"minimize  {{ {obj_list} }}")
+        print("subject to:")
+        for i in P_eq:
+            print(f"   f_{i+1}(x) - {alpha[i]:g}*||x-x_bar||^{m}"
+                  f"  <=  f_{i+1}(x_bar)")
+        for j in range(q):
+            print(f"   g_{j+1}(x) <= 0")
+
+    # ----------------------------------------------------------------- #
+    # Step 4: Theorem 2.2, condition (2)
+    # ----------------------------------------------------------------- #
+    d_prime = np.linalg.norm(x_prime - x_bar)
+    cond2_margin = fvals(x_bar) + alpha * (d_prime ** m) - fvals(x_prime)
+    cond2_ok = bool(np.all(cond2_margin >= -1e-7))
+
+    print("\n--- Theorem 2.2, condition (2) ---")
+    print("f_i(x_bar) + alpha_i*||x'-x_bar||^m - f_i(x')  for i = 1..p:")
+    print("   ", np.round(cond2_margin, 6))
+    print("Condition (2) holds for all i:", cond2_ok)
+    if cond2_ok and not P_lt:
+        print("=> (vacuous case) Theorem 2.2 hypotheses reduce trivially.")
+    elif cond2_ok:
+        print("=> If x_bar is also (numerically) locally efficient for the "
+              "RMOP above, Theorem 2.2 certifies x_bar as a SLES of order",
+              m, "for MOP with this alpha, delta.")
+    else:
+        print("=> Condition (2) fails for at least one objective: Theorem "
+              "2.2 cannot be used to certify x_bar with this x'.")
+
+    # ----------------------------------------------------------------- #
+    # Step 5: Monte Carlo search for a violation of inequality (1)
+    #         (Proposition 1.1) directly around x_bar
+    # ----------------------------------------------------------------- #
+    print("\n--- Monte Carlo stress-test of Proposition 1.1, inequality (1) ---")
+    print("Searching F ∩ B(x_bar,delta)\\{x_bar} for x that DOMINATES")
+    print("f(x_bar) + alpha*||x-x_bar||^m  (a violation of the SLES condition).")
+
+    bar_samples = sample_ball(x_bar, N)
+    violation = None
+    for x in bar_samples:
+        if np.linalg.norm(x - x_bar) < 1e-12 or not feasible(x):
+            continue
+        rhs = fvals(x_bar) + alpha * (np.linalg.norm(x - x_bar) ** m)
+        diff = fvals(x) - rhs
+        # x dominates rhs  <=>  diff <= 0 componentwise, with strict in >=1
+        if np.all(diff <= 1e-9) and np.any(diff < -1e-9):
+            violation = (x, diff)
+            break
+
+    if violation is None:
+        print(f"No violating point found among the feasible samples "
+              f"(out of {N} drawn).")
+        print(f"=> Numerical evidence (not a proof) that x_bar is consistent "
+              f"with being a SLES of order {m} for alpha = {alpha.tolist()}, "
+              f"delta = {delta}.")
+    else:
+        x_v, diff_v = violation
+        print("Violating point found:")
+        print("   x      =", np.round(x_v, 6))
+        print("   f(x)   =", np.round(fvals(x_v), 6))
+        print("   excess =", np.round(diff_v, 6), " (all <= 0, at least one < 0)")
+        print(f"=> x_bar FAILS inequality (1) for this alpha/delta: it is "
+              f"NOT a SLES of order {m} with this alpha (or delta is too large).")
+
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (EOFError, KeyboardInterrupt):
+        print("\nInput interrupted. Exiting.")
+        sys.exit(1)
+    except Exception as exc:
+        print("Error:", exc)
+        sys.exit(1)
