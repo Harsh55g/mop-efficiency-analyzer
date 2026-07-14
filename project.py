@@ -126,10 +126,18 @@ def main():
     rng = np.random.default_rng()
 
     def feasible(x):
-        return all(float(g(*x)) <= 1e-9 for g in g_funcs)
+        try:
+            return all(float(g(*x)) <= 1e-9 for g in g_funcs)
+        except TypeError:
+            # Fallback to robust SymPy substitution if numpy lambda fails
+            return all(float(ge.subs(zip(syms, x))) <= 1e-9 for ge in g_exprs)
 
     def fvals(x):
-        return np.array([float(f(*x)) for f in f_funcs], dtype=float)
+        try:
+            return np.array([float(f(*x)) for f in f_funcs], dtype=float)
+        except TypeError:
+            # Fallback to robust SymPy substitution
+            return np.array([float(fe.subs(zip(syms, x))) for fe in f_exprs], dtype=float)
 
     def penalty(x):
         # pen_i(x) = f_i(x) - alpha_i * ||x - x_bar||^m   (Lemma 2.1)
