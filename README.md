@@ -19,7 +19,7 @@ Navigating the theory of higher-order Strict Local Efficient Solutions (s.l.e.s.
 
 Want to see the model in action without installing anything locally? You can run the entire SLES analysis tool directly in your browser using Google Colab. This environment is pre-configured with all necessary dependencies, allowing you to instantly experiment with the Monte Carlo sampling and objective partitioning.
 
-[![Open In Colab]([https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/akshat-tyagi-2006/internship-project/blob/main/project.ipynb](https://colab.research.google.com/drive/1hlf8XS6TXh7R7QNJCJv84bvxcGukTDIc?usp=sharing))
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1hlf8XS6TXh7R7QNJCJv84bvxcGukTDIc)
 
 ## ⚙️ How the Code Works
 
