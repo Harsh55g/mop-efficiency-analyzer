@@ -48,7 +48,7 @@ This script numerically tests whether a specific candidate point ($\bar{x}$) is 
 
 This project is built using Python 3 and relies on two core libraries for matrix operations and algebraic parsing.
 
-Ensure you have Python 3.7+ installed, then run the following command to install the required dependencies:
+It Ensure you have Python 3.7+ installed, then run the following command to install the required dependencies:
 
 ```bash
 pip install numpy sympy
